@@ -2429,6 +2429,55 @@ def _validate_merge_group_type_selection(
         )
 
 
+def uncoded_identity_keys(
+    *,
+    document_ir: DocumentIR,
+    kg_config: CreateKGConfig,
+    merge_groups: Sequence[SFIMergeGroup],
+    sfi_candidates_by_id: dict[str, SFIRegistryCandidate],
+) -> dict[str, str]:
+    """Return the final identity key of each mintable uncoded merge group.
+
+    Uses the same identity construction as `mint_final_sfi_ids`, so dedup can see
+    which groups would mint the same final SFI. Coded groups are left out: their
+    family collisions are disambiguated during minting.
+
+    Parameters
+    ----------
+    document_ir
+        Source DocumentIR whose document key scopes the identity namespace.
+    kg_config
+        Runtime KG configuration carrying the synthetic identity policy.
+    merge_groups
+        Merge groups to key; non-mintable and coded groups are skipped.
+    sfi_candidates_by_id
+        Registry candidates keyed by registry candidate ID.
+
+    Returns
+    -------
+    dict[str, str]
+        Identity key by merge group ID.
+    """
+
+    segments_by_id = {segment.segment_id: segment for segment in document_ir.segments}
+
+    return {
+        merge_group.merge_group_id: _build_identity_key(
+            coded_identity_disambiguation=None,
+            document_ir=document_ir,
+            kg_config=kg_config,
+            merge_group=merge_group,
+            representative_candidate=_get_representative_candidate(
+                merge_group=merge_group, sfi_candidates_by_id=sfi_candidates_by_id
+            ),
+            segments_by_id=segments_by_id,
+        ).identity_key
+        for merge_group in merge_groups
+        if merge_group.merge_decision in {"merged", "singleton"}
+        and merge_group.canonical_normalized_statement_code is None
+    }
+
+
 def mint_final_sfi_ids(
     *,
     document_ir: DocumentIR,

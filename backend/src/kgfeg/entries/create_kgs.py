@@ -199,6 +199,7 @@ def build_kgs(
 
     # 7.
     sfi_merge_report = merge_sfi_candidates(
+        document_ir=kg_run_inputs.document_ir,
         kg_config=kg_run_inputs.kg_config,
         kg_dirs=kg_dirs,
         overwrite=config.overwrite,

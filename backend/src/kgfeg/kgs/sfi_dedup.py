@@ -21,6 +21,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 # Package Library
+from kgfeg.document_ir.schemas import DocumentIR
 from kgfeg.kgs.llm import KGUsageTracker, review_sfi_dedup_set
 from kgfeg.kgs.schemas import (
     SFICodeResolutionMethod,
@@ -37,6 +38,7 @@ from kgfeg.kgs.schemas import (
     SFIRegistryArtifact,
     SFIRegistryCandidate,
 )
+from kgfeg.kgs.sfi_finalization import uncoded_identity_keys
 from kgfeg.kgs.sfi_source_anchors import source_anchor_set_signature
 from kgfeg.kgs.utils import (
     KGDirs,
@@ -56,6 +58,7 @@ from kgfeg.schemas import CreateKGConfig
 from kgfeg.utils.general import make_dir, open_json_type, write_to_json
 
 _SAME_CODE_DIFFERENT_CONTENT_AUDIT_FLAG = "same_code_different_content"
+_IDENTITY_KEY_FORCED_MERGE_AUDIT_FLAG = "identity_key_forced_merge"
 
 
 @dataclass(frozen=True)
@@ -302,6 +305,8 @@ def _build_component_review_signals(
 
 def _build_current_merge_groups(
     *,
+    document_ir: DocumentIR,
+    kg_config: CreateKGConfig,
     review_responses: Sequence[SFIDedupReviewResponse],
     sfi_candidate_registry: SFIRegistryArtifact,
     sfi_candidates_by_id: dict[str, SFIRegistryCandidate],
@@ -317,6 +322,10 @@ def _build_current_merge_groups(
 
     Parameters
     ----------
+    document_ir
+        Source DocumentIR used to compute final SFI identity keys.
+    kg_config
+        Runtime KG configuration carrying the synthetic identity policy.
     review_responses
         Validated LLM dedup review responses to convert into merge groups.
     sfi_candidate_registry
@@ -349,6 +358,12 @@ def _build_current_merge_groups(
         sfi_candidates_by_id=sfi_candidates_by_id,
     )
     merge_groups.extend(singleton_groups)
+    merge_groups = _merge_identity_key_collisions(
+        document_ir=document_ir,
+        kg_config=kg_config,
+        merge_groups=merge_groups,
+        sfi_candidates_by_id=sfi_candidates_by_id,
+    )
     merge_groups = _annotate_same_code_different_content_audit_flags(merge_groups)
     merge_groups.sort(key=lambda group: (group.merge_decision, group.merge_group_id))
     _validate_merge_group_coverage(
@@ -1755,6 +1770,8 @@ def _group_same_source_occurrence_cross_type_candidates(
 def _load_complete_existing_merge_report(
     *,
     conflicts_fp: Path,
+    document_ir: DocumentIR,
+    kg_config: CreateKGConfig,
     merge_groups_fp: Path,
     merge_report_fp: Path,
     needs_review_fp: Path,
@@ -1776,6 +1793,10 @@ def _load_complete_existing_merge_report(
     ----------
     conflicts_fp
         JSON path for conflict groups.
+    document_ir
+        Source DocumentIR used to compute final SFI identity keys.
+    kg_config
+        Runtime KG configuration carrying the synthetic identity policy.
     merge_groups_fp
         JSON path for all merge groups.
     merge_report_fp
@@ -1808,6 +1829,8 @@ def _load_complete_existing_merge_report(
         merge_report = SFIMergeReport.model_validate(open_json_type(merge_report_fp))
         _validate_complete_merge_artifacts(
             conflicts_fp=conflicts_fp,
+            document_ir=document_ir,
+            kg_config=kg_config,
             merge_groups_fp=merge_groups_fp,
             merge_report=merge_report,
             merge_report_fp=merge_report_fp,
@@ -2251,6 +2274,152 @@ def _merge_edges_to_components(
         )
         for root, candidate_ids in sorted(component_ids_by_root.items())
         if len(candidate_ids) >= 2
+    ]
+
+
+def _merge_identity_key_collisions(
+    *,
+    document_ir: DocumentIR,
+    kg_config: CreateKGConfig,
+    merge_groups: Sequence[SFIMergeGroup],
+    sfi_candidates_by_id: dict[str, SFIRegistryCandidate],
+) -> list[SFIMergeGroup]:
+    """Merge mintable groups that would mint the same final SFI identity.
+
+    The dedup review compares source-visible text, while finalization keys uncoded
+    SFIs by the configured synthetic fields (type, scope, canonical value or
+    normalized text). A review can keep apart two groups that share that key, for
+    example a "THEME: NUMBER AND NUMERATION" heading and a "NUMBER AND NUMERATION" cell, and minting
+    would then fail on a UUID collision. The identity key decides: groups sharing it
+    become one merged group that keeps every candidate's provenance and carries an
+    `identity_key_forced_merge` audit flag.
+
+    Parameters
+    ----------
+    document_ir
+        Source DocumentIR used to compute final SFI identity keys.
+    kg_config
+        Runtime KG configuration carrying the synthetic identity policy.
+    merge_groups
+        Complete merge groups after LLM review and singleton fallback.
+    sfi_candidates_by_id
+        Registry candidates keyed by registry candidate ID.
+
+    Returns
+    -------
+    list[SFIMergeGroup]
+        Merge groups with identity-key collisions merged.
+
+    Raises
+    ------
+    ValueError
+        If colliding groups cannot form one valid merge group, for example when they
+        mix statement types without one source-backed type selection.
+    """
+
+    identity_keys = uncoded_identity_keys(
+        document_ir=document_ir,
+        kg_config=kg_config,
+        merge_groups=merge_groups,
+        sfi_candidates_by_id=sfi_candidates_by_id,
+    )
+    groups_by_key: dict[str, list[SFIMergeGroup]] = defaultdict(list)
+
+    for merge_group in merge_groups:
+        if merge_group.merge_group_id in identity_keys:
+            groups_by_key[identity_keys[merge_group.merge_group_id]].append(merge_group)
+
+    merged_by_first_id: dict[str, SFIMergeGroup] = {}
+    absorbed_ids: set[str] = set()
+
+    for identity_key, groups in groups_by_key.items():
+        if len(groups) < 2:
+            continue
+
+        group_ids = [group.merge_group_id for group in groups]
+        type_sources = unique_nonempty(
+            group.canonical_type_source_candidate_id for group in groups
+        )
+        type_reasons = unique_nonempty(
+            group.canonical_type_selection_reason for group in groups
+        )
+        merge_reason = (
+            f"Forced merge: merge groups {group_ids} resolve to one final SFI "
+            f"identity key {identity_key!r}. Prior decisions: "
+            + "; ".join(
+                f"{group.merge_group_id}={group.llm_decision or 'none'} "
+                f"({group.llm_review_set_id or 'no review'}): {group.merge_reason}"
+                for group in groups
+            )
+        )
+
+        try:
+            representative_ids = [
+                group.representative_candidate_id
+                for group in groups
+                if group.representative_candidate_id
+            ]
+
+            if not representative_ids:
+                raise ValueError("no colliding group names a representative candidate")
+
+            merged = _build_merge_group(
+                candidates=[
+                    sfi_candidates_by_id[candidate_id]
+                    for group in groups
+                    for candidate_id in group.registry_candidate_ids
+                ],
+                canonical_type_selection_reason=(
+                    type_reasons[0]
+                    if len(type_sources) == 1 and len(type_reasons) == 1
+                    else None
+                ),
+                canonical_type_source_candidate_id=(
+                    type_sources[0] if len(type_sources) == 1 else None
+                ),
+                llm_decision=None,
+                llm_review_set_id=None,
+                merge_decision="merged",
+                merge_reason=merge_reason,
+                representative_candidate_id=min(representative_ids),
+            )
+            merged_key = uncoded_identity_keys(
+                document_ir=document_ir,
+                kg_config=kg_config,
+                merge_groups=[merged],
+                sfi_candidates_by_id=sfi_candidates_by_id,
+            ).get(merged.merge_group_id)
+
+            if merged_key != identity_key:
+                raise ValueError(
+                    f"the merged group's identity key {merged_key!r} differs from "
+                    f"the shared key"
+                )
+        except ValueError as e:
+            raise ValueError(
+                f"Merge groups {group_ids} resolve to the same final SFI identity key "
+                f"{identity_key!r} but cannot be merged into one SFI: {e}. Fix the "
+                f"extraction, or add a distinguishing field to "
+                f"academic_standards.synthetic_merge_key_fields."
+            ) from e
+
+        logger.warning(
+            f"SFI dedup forced merge of {group_ids}: same final identity key "
+            f"{identity_key!r}."
+        )
+        # The pre-merge group IDs live on in merge_reason; they are not peers.
+        merged_by_first_id[group_ids[0]] = merged.model_copy(
+            update={
+                "audit_flags": [_IDENTITY_KEY_FORCED_MERGE_AUDIT_FLAG],
+                "audit_notes": [merge_reason],
+            }
+        )
+        absorbed_ids.update(group_ids[1:])
+
+    return [
+        merged_by_first_id.get(merge_group.merge_group_id, merge_group)
+        for merge_group in merge_groups
+        if merge_group.merge_group_id not in absorbed_ids
     ]
 
 
@@ -3685,6 +3854,8 @@ def _split_and_bound_components(
 def _validate_complete_merge_artifacts(
     *,
     conflicts_fp: Path,
+    document_ir: DocumentIR,
+    kg_config: CreateKGConfig,
     merge_groups_fp: Path,
     merge_report: SFIMergeReport,
     merge_report_fp: Path,
@@ -3708,6 +3879,10 @@ def _validate_complete_merge_artifacts(
     ----------
     conflicts_fp
         JSON path for conflict groups.
+    document_ir
+        Source DocumentIR used to compute final SFI identity keys.
+    kg_config
+        Runtime KG configuration carrying the synthetic identity policy.
     merge_groups_fp
         JSON path for all merge groups.
     merge_report
@@ -3760,6 +3935,8 @@ def _validate_complete_merge_artifacts(
         )
 
     expected_merge_groups, expected_singleton_count = _build_current_merge_groups(
+        document_ir=document_ir,
+        kg_config=kg_config,
         review_responses=merge_report.review_responses,
         sfi_candidate_registry=sfi_candidate_registry,
         sfi_candidates_by_id=sfi_candidates_by_id,
@@ -3995,6 +4172,7 @@ def _write_merge_artifacts(
 
 def merge_sfi_candidates(
     *,
+    document_ir: DocumentIR,
     kg_config: CreateKGConfig,
     kg_dirs: KGDirs,
     overwrite: bool,
@@ -4005,6 +4183,9 @@ def merge_sfi_candidates(
 
     Parameters
     ----------
+    document_ir
+        Source DocumentIR used to compute final SFI identity keys, so candidates
+        that would mint the same final SFI end in one merge group.
     kg_config
         Runtime KG creation config with dedup instructions.
     kg_dirs
@@ -4064,6 +4245,8 @@ def merge_sfi_candidates(
     else:
         existing_merge_report = _load_complete_existing_merge_report(
             conflicts_fp=conflicts_fp,
+            document_ir=document_ir,
+            kg_config=kg_config,
             merge_groups_fp=merge_groups_fp,
             merge_report_fp=merge_report_fp,
             needs_review_fp=needs_review_fp,
@@ -4109,6 +4292,8 @@ def merge_sfi_candidates(
         usage_tracker=usage_tracker,
     )
     merge_groups, unreviewed_singleton_count = _build_current_merge_groups(
+        document_ir=document_ir,
+        kg_config=kg_config,
         review_responses=review_responses,
         sfi_candidate_registry=sfi_candidate_registry,
         sfi_candidates_by_id=sfi_candidates_by_id,
