@@ -32,6 +32,7 @@ _ADAPTIVE_THINKING_MODEL_NAMES: frozenset[str] = frozenset(
         "claude-opus-4-6",
         "claude-opus-4-7",
         "claude-opus-4-8",
+        "claude-haiku-5-5",
         "claude-opus-5",
         "claude-sonnet-4-6",
     }
@@ -275,7 +276,7 @@ class ModelConfig(BaseSchema):
     max_output_tokens: int = 32768
 
     # Anthropic settings.
-    anthropic_effort: Literal["low", "medium", "high"] = "high"
+    anthropic_effort: Literal["low", "medium", "high", "max"] = "high"
     anthropic_thinking_budget_tokens: int = 16384
 
     # OpenAI settings.
