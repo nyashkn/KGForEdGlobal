@@ -8,6 +8,7 @@ candidate classification, and curriculum-specific semantics.
 """
 
 # Standard Library
+import os
 import re
 
 from dataclasses import dataclass
@@ -872,6 +873,10 @@ def find_source_anchor_span(
     -------
     tuple[int, int]
         Inclusive start and exclusive end offsets within `source_unit.source_text`.
+        With ``KGFEG_SFI_JOIN_LINE_BREAKS=1``, an excerpt with no exact match may
+        resolve to the source span holding the same words under any whitespace
+        (for example a table cell the model re-wrapped). The flag is read on each
+        call, so keep it the same for a run and every resume of it.
 
     Raises
     ------
@@ -890,6 +895,18 @@ def find_source_anchor_span(
 
         starts.append(match_start)
         search_start = match_start + len(anchor.source_text)
+
+    if (
+        not starts
+        and anchor.source_text.split()
+        and os.environ.get("KGFEG_SFI_JOIN_LINE_BREAKS") == "1"
+    ):
+        # Only after a strict miss: the model re-wrapped the cell's PDF line breaks.
+        pattern = r"\s+".join(map(re.escape, anchor.source_text.split()))
+        spans = [m.span() for m in re.finditer(pattern, source_unit.source_text)]
+
+        if anchor.occurrence_index < len(spans):
+            return spans[anchor.occurrence_index]
 
     if anchor.occurrence_index >= len(starts):
         raise ValueError(
