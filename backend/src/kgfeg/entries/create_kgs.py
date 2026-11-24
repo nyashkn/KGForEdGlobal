@@ -7,6 +7,7 @@ python src/kgfeg/entries/create_kgs.py ../examples/ghana/config_math_curriculum.
 """
 
 # Standard Library
+import os
 import sys
 import traceback
 
@@ -122,6 +123,10 @@ def build_kgs(
     23. Validate and persist standalone LP artifacts, retaining failed diagnostics.
     24. Compile and validate the additive AS+LC+LP bundle and flat projections.
 
+    If the environment variable `KGFEG_STOP_AFTER` is `as` or `lc`, the run returns
+    after step 10 or step 19 respectively, so a caller can cache each phase on its
+    own. Unset, all steps run.
+
     Parameters
     ----------
     config
@@ -147,6 +152,10 @@ def build_kgs(
     """
 
     validate_lp_checkpoint_format(kg_dirs.root)
+
+    stop_after = os.environ.get("KGFEG_STOP_AFTER", "")
+    if stop_after not in ("", "as", "lc"):
+        raise ValueError(f"KGFEG_STOP_AFTER must be 'as' or 'lc', got {stop_after!r}.")
 
     # 1.
     kg_run_inputs = load_and_validate_inputs(
@@ -241,6 +250,16 @@ def build_kgs(
         f"hasChild_relationships={final_bundle.summary.has_child_relationship_count}"
     )
 
+    if stop_after == "as":
+        # Step 11 would raise on a failed AS report; an early exit must not mask it.
+        as_report = final_bundle.validation_report
+        if not as_report.passed or as_report.errors:
+            raise ValueError(
+                "KGFEG_STOP_AFTER=as: Academic Standards validation_report has "
+                f"passed={as_report.passed} and {len(as_report.errors)} errors."
+            )
+        return kg_run_manifest_fp
+
     # 11-12.
     lc_eligible_sfis, lc_eligibility_report = select_lc_source_sfis(
         academic_standards_bundle=final_bundle,
@@ -330,6 +349,9 @@ def build_kgs(
         or as_lc_bundle.validation_report.errors
     ):
         raise ValueError("LP requires a passed, error-free AS+LC validation report.")
+
+    if stop_after == "lc":
+        return kg_run_manifest_fp
 
     if not config.overwrite:
         reused_bundle = reuse_as_lc_lp_kg(
