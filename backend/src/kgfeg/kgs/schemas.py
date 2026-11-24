@@ -7372,6 +7372,15 @@ class StandardsFrameworkItem(_CaseIdentifierMixin, _DateValidationMixin, BaseSch
     notes: Optional[str] = Field(
         default=None, description="Optional human-readable notes/context."
     )
+    position: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Zero-based source-order index of this item among the children of its "
+            "primary parent (the framework for root items). Set only when "
+            "emit_sibling_position is enabled."
+        ),
+    )
     provider: str = Field(
         description=(
             "Provider/host name for the exported KG dataset (often your organization/product). "
@@ -8162,6 +8171,7 @@ class LearningCommonsStandardsFrameworkItemProperties(_LearningCommonsWireModel)
         default=None, alias="normalizedStatementType"
     )
     notes: str | None = None
+    position: str | None = None
     provider: str
     statement_code: str | None = Field(default=None, alias="statementCode")
     statement_type: str | None = Field(default=None, alias="statementType")

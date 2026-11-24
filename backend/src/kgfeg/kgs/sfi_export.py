@@ -33,6 +33,7 @@ from kgfeg.kgs.schemas import (
     LearningCommonsStandardsFrameworkItemProperties,
     LearningCommonsStandardsFrameworkProperties,
     Relationship,
+    SFIFinalContext,
     SFIFinalRecord,
     SFIFinalSummary,
     SFIHasChildEdge,
@@ -237,6 +238,7 @@ def _build_learning_commons_nodes(
                     license=item.license,
                     normalized_statement_type=item.normalized_statement_type,
                     notes=item.notes,
+                    position=None if item.position is None else str(item.position),
                     provider=item.provider,
                     statement_code=item.statement_code,
                     statement_type=item.statement_type,
@@ -617,6 +619,73 @@ def _get_learning_commons_export_schema_version() -> str:
         )
 
     return value.strip()
+
+
+def _build_sibling_positions(
+    *, contexts: Sequence[SFIFinalContext], has_child_edges: Sequence[SFIHasChildEdge]
+) -> dict[uuid.UUID, int]:
+    """Number every exported item among its siblings in source order.
+
+    A child with several parents is numbered under its primary parent: the framework
+    when it has a root edge, otherwise the parent that appears first in the source.
+    Siblings are ordered by `SFIFinalContext.source_order` and numbered from zero,
+    matching the Learning Commons `position` convention.
+
+    Parameters
+    ----------
+    contexts
+        Final SFI contexts carrying deterministic source order.
+    has_child_edges
+        Final hasChild edges, including root edges.
+
+    Returns
+    -------
+    dict[uuid.UUID, int]
+        Zero-based sibling position keyed by child final SFI UUID.
+
+    Raises
+    ------
+    ValueError
+        If an edge endpoint has no final context.
+    """
+
+    source_order = {
+        context.final_sfi_uuid: context.source_order for context in contexts
+    }
+    primary_parent: dict[uuid.UUID, tuple[int, uuid.UUID]] = {}
+
+    for edge in has_child_edges:
+        parent_order = (
+            -1
+            if edge.source_entity == "StandardsFramework"
+            else source_order.get(edge.source_entity_uuid)
+        )
+
+        if parent_order is None or edge.child_final_sfi_uuid not in source_order:
+            raise ValueError(
+                f"Sibling position needs a final context for hasChild edge "
+                f"{edge.relationship_id}; rerun SFI finalization."
+            )
+
+        candidate = (parent_order, edge.source_entity_uuid)
+
+        if edge.child_final_sfi_uuid not in primary_parent or candidate < (
+            primary_parent[edge.child_final_sfi_uuid]
+        ):
+            primary_parent[edge.child_final_sfi_uuid] = candidate
+
+    children_by_parent: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
+
+    for child, (_, parent) in primary_parent.items():
+        children_by_parent[parent].append(child)
+
+    return {
+        child: position
+        for children in children_by_parent.values()
+        for position, child in enumerate(
+            sorted(children, key=lambda item: (source_order[item], str(item)))
+        )
+    }
 
 
 def _json_object_from_unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1643,6 +1712,18 @@ def _validate_learning_commons_item_payload(
         errors.append(
             f"Learning Commons item {item.identifier} alternateStatementCode "
             f"was not preserved."
+        )
+
+    if item_node.properties.statement_code != item.statement_code:
+        errors.append(
+            f"Learning Commons item {item.identifier} statementCode was not preserved."
+        )
+
+    if item_node.properties.position != (
+        None if item.position is None else str(item.position)
+    ):
+        errors.append(
+            f"Learning Commons item {item.identifier} position was not preserved."
         )
 
     return errors
@@ -2795,6 +2876,17 @@ def compile_academic_standards_kg(  # pylint: disable=R0915
     )
 
     # 4.
+    sibling_positions = (
+        _build_sibling_positions(
+            contexts=[
+                SFIFinalContext.model_validate(context)
+                for context in open_json_type(kg_dirs.root / "sfi_final_contexts.json")
+            ],
+            has_child_edges=has_child_edges,
+        )
+        if kg_config.academic_standards.emit_sibling_position
+        else {}
+    )
     sfis = [
         StandardsFrameworkItem(
             academic_subject=record.academic_subject,
@@ -2844,6 +2936,7 @@ def compile_academic_standards_kg(  # pylint: disable=R0915
                 ),
             },
             normalized_statement_type=record.normalized_statement_type,
+            position=sibling_positions.get(record.final_sfi_uuid),
             provider=record.provider,
             statement_code=record.statement_code,
             statement_type=record.statement_type,
