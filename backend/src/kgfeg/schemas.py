@@ -906,6 +906,16 @@ class _CreateKGAcademicStandardsConfig(BaseSchema):
             "a code type from this mapping when its codes are document-global."
         ),
     )
+    emit_sibling_position: bool = Field(
+        default=False,
+        description=(
+            "When true, export each StandardsFrameworkItem's zero-based source-order "
+            "index among its siblings as the Learning Commons position property. "
+            "Requires sfi_final_contexts.json. Off by default, which leaves the "
+            "Learning Commons export (as_nodes.jsonl) byte-identical; internal item "
+            "artifacts gain a null position."
+        ),
+    )
     excluded_table_columns_signatures: list[str] = Field(
         default_factory=list,
         description=(

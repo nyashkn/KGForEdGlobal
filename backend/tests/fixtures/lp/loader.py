@@ -109,6 +109,7 @@ ITEM_RECORD_KEYS = frozenset(
         "metadata",
         "normalized_statement_type",
         "notes",
+        "position",
         "provider",
         "statement_code",
         "statement_type",

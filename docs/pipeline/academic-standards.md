@@ -47,6 +47,7 @@ Important settings include:
 |-------------------------------------------------------|-----------------------------------------------------------------------|
 | `statement_type_policy`                               | Allowed source-facing statement types and their normalized roles      |
 | `code_patterns` / `code_parent_rules`                 | Source-code recognition and configured code-parent hints              |
+| `emit_sibling_position`                               | Opt-in: export zero-based sibling source order as `position`          |
 | `identity_scope_statement_types`                      | Curriculum dimensions that participate in SFI identity                |
 | `included_table_*` / `excluded_table_*`               | Rules controlling which DocumentIR tables are eligible for extraction |
 | `max_rows_per_table_window` / `row_overlap`           | Bounded table extraction-window size                                  |

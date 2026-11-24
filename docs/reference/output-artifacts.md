@@ -243,7 +243,12 @@ Important wire-format behavior:
 - `null` properties are omitted;
 - `isCurrent` is serialized as the string `"true"` or `"false"`;
 - mapped `gradeLevel`, when present, is serialized as a JSON-array **string** such as
-  `"[\"2\"]"`, not as a nested JSON array; and
+  `"[\"2\"]"`, not as a nested JSON array;
+- `statementCode` is present only when a source-visible code was resolved through
+  `kgs.as.code_patterns`;
+- `position` is present only when `kgs.as.emit_sibling_position` is `true`. It is the
+  zero-based source-order index among the item's siblings, serialized as a string, and
+  a multi-parent item is numbered under its earliest parent; and
 - the outer `identifier` must equal `properties.identifier`.
 
 ### Relationship record
