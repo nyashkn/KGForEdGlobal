@@ -96,7 +96,8 @@ class _Harness:
         self.results: dict[str, Any] = {name: object() for name in _PHASES}
         self.results.update(
             compile_academic_standards_kg=SimpleNamespace(
-                summary=self.bundle.summary.academic_standards
+                summary=self.bundle.summary.academic_standards,
+                validation_report=_report(),
             ),
             compile_as_lc_kg=self.bundle,
             compile_as_lc_lp_kg=SimpleNamespace(validation_report=_report()),
@@ -427,6 +428,89 @@ def test_build_preserves_phase_order_bundle_arguments_and_overwrite(
         harness.mocks["generate_learning_progressions"].call_args.kwargs["overwrite"]
         is overwrite
     )
+
+
+@pytest.mark.parametrize(
+    argnames=("stop_after", "last_phase"),
+    argvalues=[("as", "compile_academic_standards_kg"), ("lc", "compile_as_lc_kg")],
+)
+def test_build_stops_after_requested_phase(
+    monkeypatch: pytest.MonkeyPatch, stop_after: str, last_phase: str, tmp_path: Path
+) -> None:
+    """Stop after the AS or LC export when `KGFEG_STOP_AFTER` asks; reject other values.
+
+    Parameters
+    ----------
+    monkeypatch
+        Restoring phase observers and the environment variable.
+    stop_after
+        Value of `KGFEG_STOP_AFTER`.
+    last_phase
+        Final phase expected to run.
+    tmp_path
+        Isolated run directory.
+    """
+    harness = _Harness(root=tmp_path)
+    harness._install(monkeypatch=monkeypatch, real_lp=False)
+    monkeypatch.setenv("KGFEG_STOP_AFTER", stop_after)
+    result = create_kgs.build_kgs(
+        config=harness.config,
+        document_ir_fp=harness.document,
+        expected_doc_key=_DOC_KEY,
+        kg_dirs=KGDirs(root=harness.root),
+        usage_tracker=KGUsageTracker(),
+    )
+    assert harness.calls == list(_PHASES[: _PHASES.index(last_phase) + 1])
+    assert result == harness.root / "kg_run_manifest.json"
+    monkeypatch.setenv("KGFEG_STOP_AFTER", "lp")
+    with pytest.raises(ValueError, match="KGFEG_STOP_AFTER"):
+        create_kgs.build_kgs(
+            config=harness.config,
+            document_ir_fp=harness.document,
+            expected_doc_key=_DOC_KEY,
+            kg_dirs=KGDirs(root=harness.root),
+            usage_tracker=KGUsageTracker(),
+        )
+
+
+@pytest.mark.parametrize(
+    argnames="errors,passed",
+    argvalues=[
+        ([], False),
+        (["Synthetic validation error"], False),
+        (["Synthetic validation error"], True),
+    ],
+)
+def test_build_stop_after_as_rejects_failed_as_validation(
+    errors: list[str], monkeypatch: pytest.MonkeyPatch, passed: bool, tmp_path: Path
+) -> None:
+    """Raise on a failed AS report even when `KGFEG_STOP_AFTER=as` skips step 11.
+
+    Parameters
+    ----------
+    errors
+        AS report errors independent of its claimed passed state.
+    monkeypatch
+        Restoring phase observers and the environment variable.
+    passed
+        Claimed AS validation outcome.
+    tmp_path
+        Isolated run directory.
+    """
+    harness = _Harness(root=tmp_path)
+    report = harness.results["compile_academic_standards_kg"].validation_report
+    report.errors = errors
+    report.passed = passed
+    harness._install(monkeypatch=monkeypatch, real_lp=False)
+    monkeypatch.setenv("KGFEG_STOP_AFTER", "as")
+    with pytest.raises(ValueError, match="Academic Standards validation_report"):
+        create_kgs.build_kgs(
+            config=harness.config,
+            document_ir_fp=harness.document,
+            expected_doc_key=_DOC_KEY,
+            kg_dirs=KGDirs(root=harness.root),
+            usage_tracker=KGUsageTracker(),
+        )
 
 
 @pytest.mark.parametrize(argnames="phase", argvalues=_PHASES)
